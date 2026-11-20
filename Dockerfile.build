@@ -1,0 +1,22 @@
+FROM ubuntu:noble
+ARG NGINX_VERSION=1.30.7
+RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg2 ca-certificates git build-essential libpcre2-dev zlib1g-dev libssl-dev && rm -rf /var/lib/apt/lists/*
+# Same install route as the playbook: nginx.org signed repo, exact version
+RUN curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/ubuntu noble nginx" > /etc/apt/sources.list.d/nginx.list \
+ && apt-get update && apt-get install -y nginx=${NGINX_VERSION}-1~noble && rm -rf /var/lib/apt/lists/*
+RUN nginx -v 2>&1 && nginx -V 2>&1 | tee /nginx-V.txt
+WORKDIR /src
+RUN curl -fsSLO https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && tar xzf nginx-${NGINX_VERSION}.tar.gz
+RUN git clone --recurse-submodules https://github.com/google/ngx_brotli.git && git -C ngx_brotli rev-parse HEAD | tee /ngx_brotli.rev
+# Static brotli libs, position-independent, generic x86-64 (NOT -march=native: must run on any droplet CPU)
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/* \
+ && cd /src/ngx_brotli/deps/brotli && mkdir -p out && cd out \
+ && cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_C_FLAGS="-O2 -ffunction-sections -fdata-sections" .. \
+ && cmake --build . --config Release --target brotlienc -j"$(nproc)"
+RUN cd nginx-${NGINX_VERSION} \
+ && ARGS="$(nginx -V 2>&1 | sed -n 's/^configure arguments: //p')" \
+ && eval ./configure $ARGS --add-dynamic-module=/src/ngx_brotli \
+ && make modules \
+ && mkdir -p /out && cp objs/ngx_http_brotli_filter_module.so objs/ngx_http_brotli_static_module.so /out/ \
+ && ls -l /out && cp /ngx_brotli.rev /out/ngx_brotli.rev
